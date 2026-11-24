@@ -180,11 +180,10 @@ h2{font-size:.95rem;margin:18px 0 8px;color:var(--ac);text-transform:uppercase;l
 <div id="filaStatus" class="noprint" role="status" aria-live="polite"></div>
 
 <div class="actions">
-  <button type="button" class="btn share" id="btnCompartilhar">📄 Compartilhar PDF pelo WhatsApp</button>
-  <button type="button" class="btn pri" id="btnEnviarDrive">☁️ Enviar para Google Drive</button>
+  <button type="button" class="btn share" id="btnCompartilhar">📲 Compartilhar por WhatsApp</button>
   <button type="button" class="btn sec" id="btnNovo">🆕 Novo Checklist</button>
 </div>
-<p class="hint noprint" style="margin-top:8px">Toque em “Compartilhar PDF pelo WhatsApp”. Após a preparação do arquivo, toque novamente no mesmo botão e escolha o WhatsApp. Use “Novo Checklist” somente quando quiser limpar os dados e começar outro.</p>
+<p class="hint noprint" style="margin-top:8px">Toque em “Compartilhar por WhatsApp”. O app prepara o PDF, guarda o checklist para envio automático ao Google Drive e ao e-mail (mesmo sem internet) e abre o WhatsApp. Se o botão pedir, toque de novo e escolha o WhatsApp. Use “Novo Checklist” somente para limpar os dados manualmente.</p>
 <p class="hint noprint" style="margin-top:8px">O envio ao Drive é aberto: qualquer pessoa com acesso a este checklist poderá enviar dados e fotos para a conta que configurou o serviço.</p>
 </div>
 
@@ -621,6 +620,7 @@ function nomeArquivoPDF(){return nomeBase()+".pdf";}
 var arquivoPDFPronto=null,versaoDadosChecklist=0;
 function registrarAlteracaoChecklist(){
   if(arquivoPDFPronto){arquivoPDFPronto=null;}
+  if(typeof pdfWhatsPronto!=="undefined"&&pdfWhatsPronto){pdfWhatsPronto=null;pdfWhatsSemFila=false;var bw=document.getElementById("btnCompartilhar");if(bw)bw.textContent=TXT_WHATS;}
   versaoDadosChecklist++;
 }
 function mostrarMsg(texto){
@@ -788,7 +788,10 @@ function enviarItemFila(item,posicao,total){
   var k=progLer(item.id),enviado=0,soma=0;
   item.arquivos.forEach(function(a){soma+=a.dados.length;});
   function proximo(){
-    if(k>=item.arquivos.length)return postarDrive({acao:"concluir",pasta:item.pasta,pdf:item.pdfNome});
+    if(k>=item.arquivos.length)return postarDrive({acao:"concluir",pasta:item.pasta,pdf:item.pdfNome}).catch(function(e){
+      if(e&&e.message&&e.message.indexOf("não veio")!==-1)e.message="o Apps Script publicado está desatualizado: reimplante como Nova versão";
+      throw e;
+    });
     return enviarArquivoDrive(item.pasta,item.arquivos[k],function(c){
       enviado+=c;
       statusFila("☁️ Enviando "+posicao+" de "+total+" — "+Math.min(99,Math.round(enviado*100/Math.max(1,soma)))+"%","pend");
@@ -828,31 +831,79 @@ function processarFila(){
   });
 }
 function horaArquivo(){var d=new Date();return ("0"+d.getHours()).slice(-2)+"-"+("0"+d.getMinutes()).slice(-2);}
-if($("btnEnviarDrive")){
-  $("btnEnviarDrive").onclick=function(){
+var TXT_WHATS="📲 Compartilhar por WhatsApp",pdfWhatsPronto=null,pdfWhatsSemFila=false;
+function concluirWhats(btn){
+  var limpar=!pdfWhatsSemFila;
+  pdfWhatsPronto=null;pdfWhatsSemFila=false;
+  btn.textContent=TXT_WHATS;
+  if(limpar){
+    limparFormulario();
+    mostrarMsg("PDF compartilhado. O envio ao Google Drive e ao e-mail continua em segundo plano. O formulário foi limpo para o próximo checklist.");
+  }else{
+    mostrarMsg("PDF compartilhado, mas este checklist NÃO foi guardado para Drive/e-mail. Os dados continuam na tela.");
+  }
+}
+function compartilharWhats(btn,automatico){
+  var arquivo=pdfWhatsPronto;
+  if(!arquivo)return Promise.resolve();
+  function baixar(motivo){
+    baixarArquivo(arquivo);
+    btn.textContent="📤 Compartilhar de novo";
+    mostrarMsg("Não foi possível abrir o compartilhamento"+(motivo?" ("+motivo+")":"")+". O PDF foi baixado; no WhatsApp toque no clipe > Documento e escolha ‘"+arquivo.name+"’."+(pdfWhatsSemFila?"":" O envio ao Drive e ao e-mail segue normalmente."));
+  }
+  if(!podeCompartilhar([arquivo])){baixar("este aparelho não aceita esse arquivo");return Promise.resolve();}
+  var p;
+  try{p=navigator.share({files:[arquivo],title:nomeBase(),text:nomeBase()});}catch(err){p=Promise.reject(err);}
+  return Promise.resolve(p).then(function(){
+    concluirWhats(btn);
+  },function(err){
+    var nome=err&&err.name;
+    if(nome==="AbortError"){
+      btn.textContent="📤 Toque para compartilhar no WhatsApp";
+      mostrarMsg("Compartilhamento cancelado. Toque no botão para tentar de novo."+(pdfWhatsSemFila?"":" O envio ao Drive e ao e-mail segue normalmente."));
+      return;
+    }
+    if(automatico&&nome==="NotAllowedError"){
+      btn.textContent="📤 Toque para escolher o WhatsApp";
+      mostrarMsg("PDF pronto"+(pdfWhatsSemFila?".":" e já na fila para Drive e e-mail.")+" Toque novamente no botão e escolha o WhatsApp.");
+      return;
+    }
+    console.error("Falha ao compartilhar o PDF.",err);
+    baixar(nome||"erro");
+  });
+}
+if($("btnCompartilhar")){
+  $("btnCompartilhar").textContent=TXT_WHATS;
+  $("btnCompartilhar").onclick=function(){
+    var btn=this;
+    if(pdfWhatsPronto){compartilharWhats(btn,false);return;}
     if(!validar())return;
-    var btn=this,outro=$("btnCompartilhar");
-    btn.disabled=true;if(outro)outro.disabled=true;$("msg").style.display="none";
-    var versao=versaoDadosChecklist,pasta=nomeBase()+" - "+horaArquivo(),pdfNome=nomeArquivoPDF();
-    btn.textContent="⏳ Gerando PDF...";
-    gerarPDF().then(function(pdf){
-      if(versao!==versaoDadosChecklist)throw new Error("Os dados foram alterados durante a geração. Envie novamente.");
-      btn.textContent="⏳ Guardando...";
-      return blobParaBase64(pdf);
-    }).then(function(pdf64){
-      return filaSalvar({id:String(Date.now())+Math.random().toString(36).slice(2,6),pasta:pasta,pdfNome:pdfNome,arquivos:listaArquivosDrive(pdf64),criado:Date.now()});
+    btn.disabled=true;$("msg").style.display="none";
+    var versao=versaoDadosChecklist,pasta=nomeBase()+" - "+horaArquivo(),pdfNome=nomeArquivoPDF(),arquivo=null;
+    btn.textContent="⏳ Preparando PDF...";
+    gerarPDF().then(function(blob){
+      if(versao!==versaoDadosChecklist)throw new Error("Os dados foram alterados durante a geração. Toque novamente.");
+      arquivo=criarArquivo(blob,pdfNome);
+      btn.textContent="⏳ Guardando para Drive e e-mail...";
+      return blobParaBase64(blob).then(function(pdf64){
+        return filaSalvar({id:String(Date.now())+Math.random().toString(36).slice(2,6),pasta:pasta,pdfNome:pdfNome,arquivos:listaArquivosDrive(pdf64),criado:Date.now()});
+      }).then(function(){
+        pdfWhatsSemFila=false;
+      },function(err){
+        console.error("Falha ao guardar na fila.",err);
+        pdfWhatsSemFila=true;
+        mostrarMsg("Atenção: não foi possível guardar para Drive/e-mail ("+((err&&err.message)||"erro")+"). O PDF ainda pode ser compartilhado pelo WhatsApp.");
+      });
     }).then(function(){
-      limparFormulario();
-      mostrarMsg("Checklist guardado no aparelho e colocado na fila de envio. O formulário foi limpo para o próximo."+(navigator.onLine===false?" Sem internet: o envio será automático quando o sinal voltar (mantenha ou reabra este app)."
-        :" O envio ao Drive e o e-mail estão sendo feitos em segundo plano."));
-      return resumoFila().then(processarFila);
+      pdfWhatsPronto=arquivo;
+      if(!pdfWhatsSemFila)resumoFila().then(processarFila);
+      btn.disabled=false;
+      return compartilharWhats(btn,true);
     }).catch(function(err){
-      console.error("Falha ao guardar o checklist na fila.",err);
-      mostrarMsg("Não foi possível guardar o checklist para envio: "+((err&&err.message)||"erro desconhecido")+". Seus dados continuam na tela; use ‘Compartilhar PDF’ como alternativa.");
-    }).finally(function(){
-      btn.disabled=false;if(outro)outro.disabled=false;
-      btn.textContent="☁️ Enviar para Google Drive";
-    });
+      console.error(err);
+      btn.textContent=TXT_WHATS;
+      mostrarMsg("Não foi possível preparar o checklist: "+((err&&err.message)||"erro desconhecido"));
+    }).finally(function(){btn.disabled=false;});
   };
 }
 window.addEventListener("online",function(){processarFila();});
@@ -861,28 +912,6 @@ document.addEventListener("visibilitychange",function(){if(!document.hidden)proc
 setInterval(function(){processarFila();},60000);
 try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();}catch(e){}
 resumoFila().then(function(){processarFila();});
-
-if ($('btnCompartilhar')) {
-  $('btnCompartilhar').onclick=function(){
-    if(arquivoPDFPronto){compartilharPDFPronto();return;}
-    if(!validar())return;
-    var btn=this,txt=btn.textContent;btn.disabled=true;$('msg').style.display='none';
-    var versao=versaoDadosChecklist;
-    btn.textContent='⏳ Preparando PDF...';
-    gerarPDF().then(function(blob){
-      if(versao!==versaoDadosChecklist)throw new Error("Os dados foram alterados durante a geração. Prepare o PDF novamente.");
-      arquivoPDFPronto=criarArquivo(blob,nomeArquivoPDF());
-      btn.textContent='📤 PDF pronto para compartilhar';
-      mostrarMsg('PDF pronto. Toque novamente no botão e escolha o WhatsApp para compartilhar.');
-    }).catch(function(err){
-      console.error(err);
-      mostrarMsg("Não foi possível preparar o PDF: "+((err&&err.message)||"erro desconhecido"));
-    }).finally(function(){
-      btn.disabled=false;
-      if(!arquivoPDFPronto)btn.textContent=txt;
-    });
-  };
-}
 
 if ($('btnNovo')) {
   $('btnNovo').onclick=function(){
